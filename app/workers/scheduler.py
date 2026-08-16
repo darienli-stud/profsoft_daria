@@ -4,7 +4,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.services import ai_service, export_service, task_service
+from app.services import ai_service, export_service, index_service, task_service
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,36 @@ def reset_stuck_job() -> None:
         db.close()
 
 
+def process_idle_documents() -> None:
+    db = SessionLocal()
+    try:
+        document = index_service.claim_one_idle(db)
+        if document is None:
+            return
+
+        logger.info(
+            "Document %s claimed: idle -> syncing, source=%s",
+            document.id,
+            document.source,
+        )
+        try:
+            index_service.index_document(db, document)
+            db.refresh(document)
+            logger.info(
+                "Document %s status=%s",
+                document.id,
+                document.status,
+            )
+        except Exception as e:
+            logger.warning(
+                "Document %s indexing job error: %s",
+                document.id,
+                e,
+            )
+    finally:
+        db.close()
+
+
 def start_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler()
     scheduler.add_job(
@@ -104,9 +134,16 @@ def start_scheduler() -> BackgroundScheduler:
         seconds=60,
         id="reset_stuck",
     )
+    scheduler.add_job(
+        process_idle_documents,
+        "interval",
+        seconds=settings.POLL_INTERVAL,
+        id="process_idle_documents",
+    )
     scheduler.start()
     logger.info(
-        "Scheduler started: process_pending/export_done every %ss, reset_stuck every 60s",
+        "Scheduler started: process_pending/export_done/process_idle_documents "
+        "every %ss, reset_stuck every 60s",
         settings.POLL_INTERVAL,
     )
     return scheduler
